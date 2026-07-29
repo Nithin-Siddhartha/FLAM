@@ -52,7 +52,7 @@ To understand the architectural decisions below, it is helpful to visualize the 
 |   State: 'pending'    |       |     State: 'dead'     |
 |   run_after: future   |       +-----------------------+
 
-
+```
 ## 1. Storage & Concurrency Model
 * **Decision:** SQLite as the primary queue backend5.
 * **Rationale:** A memory-based queue (like a Python dictionary) would lose all job states during a power cut. SQLite writes directly to the disk, ensuring ACID compliance and state persistence5, 8. Furthermore, SQLite handles file-level locking. We leveraged `UPDATE ... RETURNING` inside `claim_atomic_job()` so that multiple concurrent workers can query the database simultaneously without ever claiming the same job.
@@ -68,16 +68,16 @@ To understand the architectural decisions below, it is helpful to visualize the 
 
 ## 4. The Dead Letter Queue (DLQ) Strategy
 * **Decision:** Capping retries and routing to a `dead` state7.
-* **Rationale:** The system differentiates between transient failures (which benefit from exponential backoff) and deterministic failures (like syntax errors, which will never succeed). By capping the attempts using `max_retries`, the system prevents broken jobs from permanently consuming worker compute cycles7.
+* **Rationale:** The system differentiates between transient failures (which benefit from exponential backoff) and deterministic failures (like syntax errors, which will never succeed). By capping the attempts using `max_retries`, the system prevents broken jobs from permanently consuming worker compute cycles.
 
 ## 5. Subprocess Standard Output Handling
-* **Decision:** Utilizing `capture_output=True` and safely parsing streams10.
+* **Decision:** Utilizing `capture_output=True` and safely parsing streams.
 * **Rationale:** System commands often fail silently or write to standard error instead of standard output. The worker logic captures both `result.stdout` and `result.stderr`10. If a job fails, the worker intelligently strips and concatenates these streams to provide a clear, readable error log, defaulting to a fallback message if no output was provided by the OS10.
-```
+
 ## 6. Assignment Questions & Tradeoffs
 **1. Which exact lines prevent two workers from claiming the same job, and why is that operation atomic across separate OS processes?**
-To prevent race conditions, I avoided fetching a job and then updating it in two separate steps. Instead, I relied on SQLite's `UPDATE ... RETURNING` syntax in `claim_atomic_job()`:
-sql
+To prevent race conditions, I avoided fetching a job and then updating it in two separate steps. Instead, I relied on SQLite's `UPDATE ... RETURNING` syntax in `claim_atomic_job()`: SQL
+
 UPDATE jobs 
 SET state = 'processing', updated_at = ? 
 WHERE id = (
@@ -109,3 +109,4 @@ If I needed to add priorities tomorrow, the vast majority of the architecture su
 What breaks (and requires refactoring) is the job ingestion and the claim query:
 1.  **Schema & CLI:** `init_db()` needs a new `priority` column, and the `enqueue` command needs to parse it.
 2.  **The Claim Query:** The inner subquery inside `claim_atomic_job()` currently just grabs the oldest job via `LIMIT 1`. It would violate the priority rule. I would need to rewrite that subquery to `ORDER BY priority DESC, created_at ASC LIMIT 1` so high-priority jobs automatically bubble to the top of the lock.
+```
