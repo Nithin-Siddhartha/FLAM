@@ -3,6 +3,7 @@ import os
 
 CONFIG_PATH = "queuectl.json"
 
+
 def get_config():
     if os.path.exists(CONFIG_PATH):
         with open(CONFIG_PATH, "r") as f:
