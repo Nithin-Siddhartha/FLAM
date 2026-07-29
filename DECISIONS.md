@@ -1,15 +1,23 @@
 # Architectural Decisions Record (ADR)
 
-This document outlines the core architectural choices, data flow mechanisms, and edge-case mitigations implemented in the QueueCTL system.
+This document outlines the core architectural choices, data flow mechanisms, and edge-case mitigations implemented in the QueueCTL system. 
 
-# Architectural Decisions Record (ADR)
+## 1. Architecture Advantages & Problem Solving
+The architecture of QueueCTL was designed defensively, operating under the assumption that hardware fails, processes crash, and commands hang. 
 
-This document outlines the core architectural choices, data flow mechanisms, and edge-case mitigations implemented in the QueueCTL system.
+By leveraging SQLite's native file-locking alongside Python's multiprocessing capabilities, the architecture provides several distinct advantages that directly address the core challenges of background job processing:
+* **Zero-Dependency Concurrency (Addresses Q1):** By pushing the concurrency locking down to the SQLite C-engine via `UPDATE ... RETURNING`, we eliminate the need for external lock managers (like Redis) or complex Python threading locks, resulting in a lightweight but highly robust concurrent system.
+* **Guaranteed State Recovery (Addresses Q2):** The system assumes sudden death (`SIGKILL` or power cuts) is a normal operating condition. The 45-second zombie sweeping mechanism ensures no job is ever permanently orphaned in a `processing` state.
+* **Clean Operational Handoffs (Addresses Q3):** Differentiating between automated transient retries (Exponential Backoff) and permanent deterministic failures (Dead Letter Queue) ensures worker compute isn't wasted on broken jobs, while allowing developers a clean interface to retry jobs once bugs are fixed.
+* **Lightweight Inter-Process Communication (Addresses Q4):** Using OS-level signaling (`SIGTERM` via PID files) avoids the heavy disk I/O of database polling and the memory complexity of shared IPC events, keeping the worker loop incredibly fast.
+* **High Extensibility (Addresses Q5):** The strict separation between the execution engine (`workers.py`) and the data access layer (`model.py`) means future features (like priority queues) only require tweaking a single SQL query rather than rewriting the execution logic.
 
-## 1. Execution Flow Overview
-To understand the architectural decisions below, it is helpful to visualize the normal execution lifecycle of a single job navigating the queue[cite: 3, 7, 10]:
+---
 
-    ```text
+## 2. Execution Flow Overview
+To understand the architectural decisions below, it is helpful to visualize the normal execution lifecycle of a single job navigating the queue:
+
+```text
     [ User / CLI ] 
           | (main.py enqueue)
           v
@@ -43,29 +51,28 @@ To understand the architectural decisions below, it is helpful to visualize the 
 |  Exponential Backoff  |       |   Dead Letter Queue   |
 |   State: 'pending'    |       |     State: 'dead'     |
 |   run_after: future   |       +-----------------------+
-+-----------------------+
 
 
 ## 1. Storage & Concurrency Model
-* **Decision:** SQLite as the primary queue backend[cite: 5].
-* **Rationale:** A memory-based queue (like a Python dictionary) would lose all job states during a power cut. SQLite writes directly to the disk, ensuring ACID compliance and state persistence[cite: 5, 8]. Furthermore, SQLite handles file-level locking. We leveraged `UPDATE ... RETURNING` inside `claim_atomic_job()` so that multiple concurrent workers can query the database simultaneously without ever claiming the same job[cite: 7].
+* **Decision:** SQLite as the primary queue backend5.
+* **Rationale:** A memory-based queue (like a Python dictionary) would lose all job states during a power cut. SQLite writes directly to the disk, ensuring ACID compliance and state persistence5, 8. Furthermore, SQLite handles file-level locking. We leveraged `UPDATE ... RETURNING` inside `claim_atomic_job()` so that multiple concurrent workers can query the database simultaneously without ever claiming the same job.
 
 ## 2. Process Execution Over Threading
-* **Decision:** Utilizing `multiprocessing.Process` for background workers[cite: 10].
-* **Rationale:** Python's Global Interpreter Lock (GIL) prevents threads from executing true parallel CPU instructions. By spawning entirely separate processes, each worker gets its own memory space and can run heavy `subprocess.run` tasks without blocking the other workers[cite: 10].
+* **Decision:** Utilizing `multiprocessing.Process` for background workers10.
+* **Rationale:** Python's Global Interpreter Lock (GIL) prevents threads from executing true parallel CPU instructions. By spawning entirely separate processes, each worker gets its own memory space and can run heavy `subprocess.run` tasks without blocking the other workers.
 
 ## 3. Zombie Job Sweeping (The 45-Second Rule)
-* **Decision:** Implementing `recover_zombie_jobs()` at the top of the worker loop[cite: 7, 10].
-* **Rationale:** If a worker's machine loses power, the job it was processing remains stuck in the `processing` state indefinitely. The system calculates a 45-second cutoff threshold[cite: 7]. Any processing job older than this threshold is dynamically recovered[cite: 7]. 
-* **Infinite Loop Mitigation:** When recovering a zombie, the system intentionally adds `+1` to its `attempts` counter[cite: 7]. This ensures that jobs which inherently take longer than 45 seconds will eventually hit the retry limit and fail safely into the Dead Letter Queue, rather than looping infinitely between workers[cite: 7, 10].
+* **Decision:** Implementing `recover_zombie_jobs()` at the top of the worker loop7, 10.
+* **Rationale:** If a worker's machine loses power, the job it was processing remains stuck in the `processing` state indefinitely. The system calculates a 45-second cutoff threshold7. Any processing job older than this threshold is dynamically recovered. 
+* **Infinite Loop Mitigation:** When recovering a zombie, the system intentionally adds `+1` to its `attempts` counter. This ensures that jobs which inherently take longer than 45 seconds will eventually hit the retry limit and fail safely into the Dead Letter Queue, rather than looping infinitely between workers.
 
 ## 4. The Dead Letter Queue (DLQ) Strategy
-* **Decision:** Capping retries and routing to a `dead` state[cite: 7].
-* **Rationale:** The system differentiates between transient failures (which benefit from exponential backoff) and deterministic failures (like syntax errors, which will never succeed)[cite: 7, 10]. By capping the attempts using `max_retries`, the system prevents broken jobs from permanently consuming worker compute cycles[cite: 7].
+* **Decision:** Capping retries and routing to a `dead` state7.
+* **Rationale:** The system differentiates between transient failures (which benefit from exponential backoff) and deterministic failures (like syntax errors, which will never succeed). By capping the attempts using `max_retries`, the system prevents broken jobs from permanently consuming worker compute cycles7.
 
 ## 5. Subprocess Standard Output Handling
-* **Decision:** Utilizing `capture_output=True` and safely parsing streams[cite: 10].
-* **Rationale:** System commands often fail silently or write to standard error instead of standard output. The worker logic captures both `result.stdout` and `result.stderr`[cite: 10]. If a job fails, the worker intelligently strips and concatenates these streams to provide a clear, readable error log, defaulting to a fallback message if no output was provided by the OS[cite: 10].
+* **Decision:** Utilizing `capture_output=True` and safely parsing streams10.
+* **Rationale:** System commands often fail silently or write to standard error instead of standard output. The worker logic captures both `result.stdout` and `result.stderr`10. If a job fails, the worker intelligently strips and concatenates these streams to provide a clear, readable error log, defaulting to a fallback message if no output was provided by the OS10.
 
 ## 6. Assignment Questions & Tradeoffs
 **1. Which exact lines prevent two workers from claiming the same job, and why is that operation atomic across separate OS processes?**
