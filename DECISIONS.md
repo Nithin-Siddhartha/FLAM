@@ -76,7 +76,7 @@ To understand the architectural decisions below, it is helpful to visualize the 
 
 ## 6. Assignment Questions & Tradeoffs
 **1. Which exact lines prevent two workers from claiming the same job, and why is that operation atomic across separate OS processes?**
-To prevent race conditions, I avoided fetching a job and then updating it in two separate steps. Instead, I relied on SQLite's `UPDATE ... RETURNING` syntax in `claim_atomic_job()`: SQL
+To prevent race conditions, I avoided fetching a job and then updating it in two separate steps. Instead, I relied on SQLite's `UPDATE ... RETURNING` syntax in `claim_atomic_job()`: ```SQL
 
 UPDATE jobs 
 SET state = 'processing', updated_at = ? 
@@ -109,4 +109,3 @@ If I needed to add priorities tomorrow, the vast majority of the architecture su
 What breaks (and requires refactoring) is the job ingestion and the claim query:
 1.  **Schema & CLI:** `init_db()` needs a new `priority` column, and the `enqueue` command needs to parse it.
 2.  **The Claim Query:** The inner subquery inside `claim_atomic_job()` currently just grabs the oldest job via `LIMIT 1`. It would violate the priority rule. I would need to rewrite that subquery to `ORDER BY priority DESC, created_at ASC LIMIT 1` so high-priority jobs automatically bubble to the top of the lock.
-```
