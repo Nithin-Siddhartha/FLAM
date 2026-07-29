@@ -73,18 +73,18 @@ To understand the architectural decisions below, it is helpful to visualize the 
 ## 5. Subprocess Standard Output Handling
 * **Decision:** Utilizing `capture_output=True` and safely parsing streams10.
 * **Rationale:** System commands often fail silently or write to standard error instead of standard output. The worker logic captures both `result.stdout` and `result.stderr`10. If a job fails, the worker intelligently strips and concatenates these streams to provide a clear, readable error log, defaulting to a fallback message if no output was provided by the OS10.
-
+```
 ## 6. Assignment Questions & Tradeoffs
 **1. Which exact lines prevent two workers from claiming the same job, and why is that operation atomic across separate OS processes?**
 To prevent race conditions, I avoided fetching a job and then updating it in two separate steps. Instead, I relied on SQLite's `UPDATE ... RETURNING` syntax in `claim_atomic_job()`:
-```sql
+sql
 UPDATE jobs 
 SET state = 'processing', updated_at = ? 
 WHERE id = (
     SELECT id FROM jobs WHERE state = 'pending' AND run_after <= ? LIMIT 1
 ) 
 RETURNING id, command, attempts, max_retries
-```
+
 This is atomic because SQLite uses strict file-level locking for write operations. When Worker A executes this update, the database engine locks the file. The subquery finds the job, updates its state to `processing`, and returns the data all in one indivisible C-level operation. By the time the lock is released for Worker B, that specific job is no longer `pending`, making a double-claim impossible.
 
 **2. A worker is SIGKILL'ed halfway through a job. Walk through, step by step, what state the job is in and how it eventually runs again. What is the worst-case delay before recovery?**
